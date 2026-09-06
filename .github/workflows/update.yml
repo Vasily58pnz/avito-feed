@@ -1,0 +1,33 @@
+name: Update Avito Feed
+
+on:
+  schedule:
+    # Запуск каждый день в 05:00 по UTC (08:00 по Московскому времени)
+    - cron: '0 5 * * *'
+  workflow_dispatch: # Добавляет кнопку для ручного запуска
+
+permissions:
+  contents: write # Разрешает боту сохранять готовый файл обратно
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Загрузка файлов
+        uses: actions/checkout@v4
+
+      - name: Установка Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Запуск парсера
+        run: avito_feed_generator.py
+
+      - name: Сохранение XML-файла
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add avito_feed.xml
+          git commit -m "Автоматическое обновление фида" || echo "Изменений нет"
+          git push
