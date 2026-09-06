@@ -22,7 +22,7 @@ jobs:
           python-version: '3.12'
 
       - name: Запуск парсера
-        run: avito_feed_generator.py
+        run: python avito_feed_generator.py
 
       - name: Сохранение XML-файла
         run: |
