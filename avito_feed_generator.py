@@ -1,6 +1,7 @@
 import os
 import re
 import math
+import json
 import urllib.request
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
@@ -12,6 +13,7 @@ from collections import defaultdict
 YML_URL = "https://ctradei.com/x/shop2_1410641-yml.xml"
 LOCAL_YML_FILE = "supplier_catalog.xml"
 OUTPUT_AVITO_XML = "avito_feed.xml"
+ID_MAP_FILE = "id_map.json"
 
 # Базовый адрес твоих обложек с GitHub Pages
 GITHUB_COVERS_BASE = "https://vasily58pnz.github.io/avito-beds2/covers"
@@ -33,17 +35,31 @@ OUT_OF_STOCK_STOP_WORDS = [
 ]
 
 
+def load_id_map(filepath):
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                print(f"📖 Загружена карта ID из {filepath}: {len(data)} записей.")
+                return data
+        except Exception as e:
+            print(f"⚠️ Ошибка чтения {filepath}: {e}. Создается новая база.")
+    return {}
+
+
+def save_id_map(filepath, data):
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"💾 Карта ID успешно сохранена в {filepath} (всего: {len(data)} шт.)")
+    except Exception as e:
+        print(f"❌ Ошибка сохранения {filepath}: {e}")
+
+
 def extract_video_file_url(raw_video_str):
-    """
-    Ищет строго видеофайлы для тега VideoFileURL:
-    1. Яндекс Диск (disk.yandex.ru, disk.360.yandex.ru, yadi.sk)
-    2. Прямые HTTP-ссылки на видеофайлы (.mp4, .mov, .hevc, .webm)
-    YouTube и сторонние плееры полностью игнорируются.
-    """
     if not raw_video_str:
         return ""
         
-    # Разделяем ссылки, если они указаны через запятую, точку с запятой или пробелы
     parts = re.split(r'[,;\s]+', str(raw_video_str).strip())
     
     for link in parts:
@@ -403,6 +419,9 @@ def parse_yml_and_build_avito(yml_path, output_path):
         print(f"Файл {yml_path} не найден.")
         return
 
+    # Загружаем сохраненные соответствия ID
+    id_map = load_id_map(ID_MAP_FILE)
+
     print("Парсинг YML фида...")
     tree = ET.parse(yml_path)
     root = tree.getroot()
@@ -492,7 +511,6 @@ def parse_yml_and_build_avito(yml_path, output_path):
         duvet_det, sheet_det, pillow_det = parse_dimensions_from_supplier_section(offer, raw_desc, offer_size, params_dict)
         direct_dims = extract_item_dimensions(title, params_dict, raw_desc, url_text)
         
-        # Забираем только Яндекс Диск или прямые видеофайлы (YouTube игнорируем)
         raw_supplier_video = params_dict.get("Яндекс Видео", "") or \
                              params_dict.get("Ссылка на видео", "") or \
                              params_dict.get("Видео", "")
@@ -500,6 +518,7 @@ def parse_yml_and_build_avito(yml_path, output_path):
 
         groups[group_key].append({
             "offer_id": offer_id,
+            "group_id": group_id_attr,
             "title": title,
             "price": retail_price,
             "vendor_code": vendor_code,
@@ -525,8 +544,7 @@ def parse_yml_and_build_avito(yml_path, output_path):
 
     for group_key, items in groups.items():
         primary_item = items[0]
-        base_id = primary_item["offer_id"]
-        base_code = primary_item["vendor_code"] or base_id
+        base_code = primary_item["vendor_code"] or primary_item["offer_id"]
         base_title = primary_item["title"]
         params_dict = primary_item["params"]
         subtype = determine_subtype(base_title)
@@ -534,7 +552,29 @@ def parse_yml_and_build_avito(yml_path, output_path):
         if SKIP_BEDSPREADS and subtype in ["Покрывала", "Пледы"]:
             continue
 
-        final_ad_id = f"{ID_PREFIX}{base_id}"
+        # -------------------------------------------------------------
+        # СТАБИЛЬНЫЙ МЕХАНИЗМ ID ЧЕРЕЗ id_map.json
+        # -------------------------------------------------------------
+        # Уникальный ключ модели (отрезаем суффиксы размеров, если они есть)
+        clean_model_key = re.sub(r'[-_](1\.5|2\.0|E|EURO|DUET|FAM|5070|7070|1SP|2SP).*$', '', base_code).strip()
+        if not clean_model_key:
+            clean_model_key = group_key
+
+        if clean_model_key in id_map:
+            # 1. Если модель уже публиковалась — берем ее постоянный ID
+            final_ad_id = id_map[clean_model_key]
+        else:
+            # 2. Если новинка: берем group_id или стабильный минимальный offer_id
+            group_id_val = primary_item.get("group_id") or ""
+            if group_id_val:
+                chosen_num = group_id_val
+            else:
+                digits = [int(it["offer_id"]) for it in items if it["offer_id"].isdigit()]
+                chosen_num = str(min(digits)) if digits else primary_item["offer_id"]
+
+            final_ad_id = f"{ID_PREFIX}{chosen_num}"
+            id_map[clean_model_key] = final_ad_id
+
         min_price = min(item["price"] for item in items)
 
         if subtype == "Комплект постельного белья":
@@ -573,16 +613,11 @@ def parse_yml_and_build_avito(yml_path, output_path):
                     seen_imgs.add(img)
                     all_images.append(img)
 
-        # ----------------------------------------------------
-        # ЗАМЕЩЕНИЕ ПЕРВОЙ ФОТОГРАФИИ ОБЛОЖКОЙ С ИНФОГРАФИКОЙ
-        # ----------------------------------------------------
+        # Замещение первой фотографии обложкой с инфографикой
         safe_art = re.sub(r'[\\/*?:"<>| ]', '_', base_code)
         custom_cover_url = f"{GITHUB_COVERS_BASE}/{safe_art}.jpg"
 
-        # 1. Наша обложка с инфографикой встает первой
         final_gallery = [custom_cover_url]
-
-        # 2. Исходное 1-е фото отрезаем (all_images[1:]), чтобы исключить дубль
         other_photos = all_images[1:] if len(all_images) > 1 else []
 
         for img in other_photos:
@@ -760,6 +795,9 @@ def parse_yml_and_build_avito(yml_path, output_path):
 
         desc_storage[processed_count] = description_body
         processed_count += 1
+
+    # Сохраняем обновленную карту ID для памяти в GitHub
+    save_id_map(ID_MAP_FILE, id_map)
 
     raw_xml_string = ET.tostring(ads_node, encoding='utf-8').decode('utf-8')
     reparsed = minidom.parseString(raw_xml_string.encode('utf-8'))
