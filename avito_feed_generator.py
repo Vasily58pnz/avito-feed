@@ -13,6 +13,9 @@ YML_URL = "https://ctradei.com/x/shop2_1410641-yml.xml"
 LOCAL_YML_FILE = "supplier_catalog.xml"
 OUTPUT_AVITO_XML = "avito_feed.xml"
 
+# Базовый адрес твоих обложек с GitHub Pages
+GITHUB_COVERS_BASE = "https://vasily58pnz.github.io/avito-beds2/covers"
+
 ID_PREFIX = "MNT-"
 
 STATIC_BRAND = "СИТРЕЙД"
@@ -30,21 +33,30 @@ OUT_OF_STOCK_STOP_WORDS = [
 ]
 
 
-def clean_allowed_video_url(url):
+def extract_video_file_url(raw_video_str):
     """
-    Пропускает только поддерживаемые Авито форматы для VideoFileURL:
-    1. Ссылки на Яндекс Диск (disk.yandex.ru, yadi.sk)
+    Ищет строго видеофайлы для тега VideoFileURL:
+    1. Яндекс Диск (disk.yandex.ru, disk.360.yandex.ru, yadi.sk)
     2. Прямые HTTP-ссылки на видеофайлы (.mp4, .mov, .hevc, .webm)
+    YouTube и сторонние плееры полностью игнорируются.
     """
-    if not url:
+    if not raw_video_str:
         return ""
-    url = url.strip()
-
-    is_yandex_disk = "disk.yandex.ru" in url or "yadi.sk" in url
-    is_direct_video = bool(re.search(r'\.(mp4|mov|hevc|webm)(\?[^\s<>"]*)?$', url, flags=re.IGNORECASE))
-
-    if is_yandex_disk or is_direct_video:
-        return url
+        
+    # Разделяем ссылки, если они указаны через запятую, точку с запятой или пробелы
+    parts = re.split(r'[,;\s]+', str(raw_video_str).strip())
+    
+    for link in parts:
+        link = link.strip()
+        if not link:
+            continue
+            
+        is_yandex_disk = any(d in link.lower() for d in ["disk.yandex.ru", "disk.360.yandex.ru", "yadi.sk"])
+        is_direct_video = bool(re.search(r'\.(mp4|mov|hevc|webm)(\?[^\s<>"]*)?$', link, flags=re.IGNORECASE))
+        
+        if is_yandex_disk or is_direct_video:
+            return link
+            
     return ""
 
 
@@ -480,9 +492,11 @@ def parse_yml_and_build_avito(yml_path, output_path):
         duvet_det, sheet_det, pillow_det = parse_dimensions_from_supplier_section(offer, raw_desc, offer_size, params_dict)
         direct_dims = extract_item_dimensions(title, params_dict, raw_desc, url_text)
         
-        # Получаем ссылку на видео напрямую от поставщика
-        raw_supplier_video = params_dict.get("Яндекс Видео", "") or params_dict.get("Ссылка на видео", "")
-        feed_video = clean_allowed_video_url(raw_supplier_video)
+        # Забираем только Яндекс Диск или прямые видеофайлы (YouTube игнорируем)
+        raw_supplier_video = params_dict.get("Яндекс Видео", "") or \
+                             params_dict.get("Ссылка на видео", "") or \
+                             params_dict.get("Видео", "")
+        feed_video = extract_video_file_url(raw_supplier_video)
 
         groups[group_key].append({
             "offer_id": offer_id,
@@ -550,6 +564,7 @@ def parse_yml_and_build_avito(yml_path, output_path):
             has_multiple = len(items) > 1
             single_size_label = ""
 
+        # Собираем фото поставщика
         all_images = []
         seen_imgs = set()
         for it in items:
@@ -557,6 +572,22 @@ def parse_yml_and_build_avito(yml_path, output_path):
                 if img not in seen_imgs:
                     seen_imgs.add(img)
                     all_images.append(img)
+
+        # ----------------------------------------------------
+        # ЗАМЕЩЕНИЕ ПЕРВОЙ ФОТОГРАФИИ ОБЛОЖКОЙ С ИНФОГРАФИКОЙ
+        # ----------------------------------------------------
+        safe_art = re.sub(r'[\\/*?:"<>| ]', '_', base_code)
+        custom_cover_url = f"{GITHUB_COVERS_BASE}/{safe_art}.jpg"
+
+        # 1. Наша обложка с инфографикой встает первой
+        final_gallery = [custom_cover_url]
+
+        # 2. Исходное 1-е фото отрезаем (all_images[1:]), чтобы исключить дубль
+        other_photos = all_images[1:] if len(all_images) > 1 else []
+
+        for img in other_photos:
+            if img != custom_cover_url and img not in final_gallery:
+                final_gallery.append(img)
 
         material = extract_textile_material(base_title, params_dict)
         final_avito_title = generate_group_title(
@@ -702,7 +733,7 @@ def parse_yml_and_build_avito(yml_path, output_path):
         ET.SubElement(ad_node, "Price").text = str(min_price)
         ET.SubElement(ad_node, "Address").text = AVITO_ADDRESS
         
-        # Видео берётся только от поставщика (если есть в группе хотя бы у одного товара)
+        # Ищем видеофайлы Яндекс Диска в товарах группы
         group_video_url = ""
         for it in items:
             if it.get("feed_video"):
@@ -721,9 +752,10 @@ def parse_yml_and_build_avito(yml_path, output_path):
                 "url": group_video_url
             })
         
-        if all_images:
+        # Запись картинок: кастомная обложка первая, затем ракурсы
+        if final_gallery:
             images_node = ET.SubElement(ad_node, "Images")
-            for img_url in all_images[:10]:
+            for img_url in final_gallery[:10]:
                 ET.SubElement(images_node, "Image", url=img_url)
 
         desc_storage[processed_count] = description_body
@@ -762,5 +794,12 @@ def parse_yml_and_build_avito(yml_path, output_path):
 
 
 if __name__ == "__main__":
-    download_supplier_feed(YML_URL, LOCAL_YML_FILE)
-    parse_yml_and_build_avito(LOCAL_YML_FILE, OUTPUT_AVITO_XML)
+    try:
+        download_supplier_feed(YML_URL, LOCAL_YML_FILE)
+        parse_yml_and_build_avito(LOCAL_YML_FILE, OUTPUT_AVITO_XML)
+    except Exception as e:
+        print(f"\n❌ Ошибка: {e}")
+        import traceback
+        traceback.print_exc()
+
+    input("\nНажмите Enter для выхода...")
