@@ -13,12 +13,11 @@ YML_URL = "https://ctradei.com/x/shop2_1410641-yml.xml"
 LOCAL_YML_FILE = "supplier_catalog.xml"
 OUTPUT_AVITO_XML = "avito_feed.xml"
 
-VIDEO_FILE = "videos.txt"
 ID_PREFIX = "MNT-"
 
 STATIC_BRAND = "СИТРЕЙД"
 MARGIN_MULTIPLIER = 1.30
-DELIVERY_FEE = 500  # <--- ДОБАВЛЕНО 500 РУБЛЕЙ К КАЖДОМУ ТОВАРУ ДЛЯ БЕСПЛАТНОЙ ДОСТАВКИ
+DELIVERY_FEE = 500  # Добавлено 500 рублей к каждому товару для бесплатной доставки
 PRICE_ROUND_STEP = 50
 AVITO_ADDRESS = "Санкт-Петербург, улица Циолковского, 9"
 
@@ -31,41 +30,20 @@ OUT_OF_STOCK_STOP_WORDS = [
 ]
 
 
-def load_video_mapping(filepath):
-    target_file = filepath
-    if not os.path.exists(target_file):
-        if os.path.exists("videos"):
-            target_file = "videos"
-        else:
-            return {}
-            
-    video_map = {}
-    with open(target_file, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" in line:
-                sku, url = line.split("=", 1)
-            elif ":" in line:
-                sku, url = line.split(":", 1)
-            else:
-                parts = line.split()
-                if len(parts) >= 2:
-                    sku, url = parts[0], parts[1]
-                else:
-                    continue
-            video_map[sku.strip().upper()] = url.strip()
-            
-    return video_map
-
-
 def clean_allowed_video_url(url):
-    """Пропускает только разрешенные Авито видео (VK и Rutube), блокируя неработающий YouTube"""
+    """
+    Пропускает только поддерживаемые Авито форматы для VideoFileURL:
+    1. Ссылки на Яндекс Диск (disk.yandex.ru, yadi.sk)
+    2. Прямые HTTP-ссылки на видеофайлы (.mp4, .mov, .hevc, .webm)
+    """
     if not url:
         return ""
     url = url.strip()
-    if "rutube.ru" in url or "vk.com" in url or "vkvideo.ru" in url:
+
+    is_yandex_disk = "disk.yandex.ru" in url or "yadi.sk" in url
+    is_direct_video = bool(re.search(r'\.(mp4|mov|hevc|webm)(\?[^\s<>"]*)?$', url, flags=re.IGNORECASE))
+
+    if is_yandex_disk or is_direct_video:
         return url
     return ""
 
@@ -251,25 +229,18 @@ def parse_dimensions_from_supplier_section(offer_elem, raw_desc, target_size, pa
     return duvet, sheet, pillow
 
 
-# ==========================================
-# ОБНОВЛЕННЫЕ ФУНКЦИИ ПАРСИНГА РАЗМЕРОВ
-# ==========================================
-
 def extract_item_dimensions(title, params_dict, raw_description="", url=""):
-    # 1. Приоритет №1: Ищем размер в URL (самый точный маркер вариации, если нет параметров)
     if url:
         match_url = re.search(r'(1\d{2}|2\d{2})[-xх](1\d{2}|2\d{2})', url.lower())
         if match_url:
             return f"{match_url.group(1)}х{match_url.group(2)} см"
 
-    # 2. Приоритет №2: Ищем в параметрах и заголовке
     scan_primary = f"{params_dict.get('Выбрать размер', '')} {params_dict.get('Размер', '')} {params_dict.get('Размер комплекта', '')} {params_dict.get('Размер покрывала', '')} {params_dict.get('Размер пододеяльника', '')} {params_dict.get('Габариты', '')} {title}".lower()
     
     match_primary = re.search(r'(?<!\d)(1[0-9]{2}|2[0-9]{2})\s*[\*хx×-]\s*(1[0-9]{2}|2[0-9]{2})(?!\d)', scan_primary)
     if match_primary:
         return f"{match_primary.group(1)}х{match_primary.group(2)} см"
 
-    # 3. Приоритет №3: Ищем в тексте описания
     match_desc = re.search(r'(?<!\d)(1[0-9]{2}|2[0-9]{2})\s*[\*хx×-]\s*(1[0-9]{2}|2[0-9]{2})(?!\d)', raw_description.lower())
     if match_desc:
         return f"{match_desc.group(1)}х{match_desc.group(2)} см"
@@ -312,8 +283,6 @@ def parse_duvet_numeric(title, params_dict, raw_description=""):
         w, l = int(match.group(1)), int(match.group(2))
         return str(min(w, l)), str(max(w, l))
     return "200", "220"
-
-# ==========================================
 
 
 def format_supplier_description_block(raw_desc):
@@ -422,8 +391,6 @@ def parse_yml_and_build_avito(yml_path, output_path):
         print(f"Файл {yml_path} не найден.")
         return
 
-    video_map = load_video_mapping(VIDEO_FILE)
-
     print("Парсинг YML фида...")
     tree = ET.parse(yml_path)
     root = tree.getroot()
@@ -512,7 +479,10 @@ def parse_yml_and_build_avito(yml_path, output_path):
         offer_size = detect_exact_offer_size(offer, title, raw_desc, params_dict, category_names)
         duvet_det, sheet_det, pillow_det = parse_dimensions_from_supplier_section(offer, raw_desc, offer_size, params_dict)
         direct_dims = extract_item_dimensions(title, params_dict, raw_desc, url_text)
-        feed_video = clean_allowed_video_url(params_dict.get("Ссылка на видео", ""))
+        
+        # Получаем ссылку на видео напрямую от поставщика
+        raw_supplier_video = params_dict.get("Яндекс Видео", "") or params_dict.get("Ссылка на видео", "")
+        feed_video = clean_allowed_video_url(raw_supplier_video)
 
         groups[group_key].append({
             "offer_id": offer_id,
@@ -537,6 +507,7 @@ def parse_yml_and_build_avito(yml_path, output_path):
     attached_videos_log = []
     processed_count = 0
     desc_storage = {}
+    video_storage = {}
 
     for group_key, items in groups.items():
         primary_item = items[0]
@@ -731,21 +702,23 @@ def parse_yml_and_build_avito(yml_path, output_path):
         ET.SubElement(ad_node, "Price").text = str(min_price)
         ET.SubElement(ad_node, "Address").text = AVITO_ADDRESS
         
-        raw_video = (
-            video_map.get(base_code.upper()) or 
-            video_map.get(base_id.upper()) or 
-            video_map.get(f"{ID_PREFIX}{base_id}".upper()) or
-            primary_item["feed_video"]
-        )
-        valid_video_url = clean_allowed_video_url(raw_video)
+        # Видео берётся только от поставщика (если есть в группе хотя бы у одного товара)
+        group_video_url = ""
+        for it in items:
+            if it.get("feed_video"):
+                group_video_url = it["feed_video"]
+                break
         
-        if valid_video_url:
-            ET.SubElement(ad_node, "VideoURL").text = valid_video_url
+        if group_video_url:
+            video_element = ET.SubElement(ad_node, "VideoFileURL")
+            video_element.text = f"__VIDEO_PLACEHOLDER_{processed_count}__"
+            video_storage[processed_count] = group_video_url
+            
             attached_videos_log.append({
                 "id": final_ad_id,
                 "code": base_code,
                 "title": final_avito_title,
-                "url": valid_video_url
+                "url": group_video_url
             })
         
         if all_images:
@@ -765,6 +738,11 @@ def parse_yml_and_build_avito(yml_path, output_path):
         cdata_block = f"<![CDATA[{desc_content}]]>"
         pretty_xml = pretty_xml.replace(placeholder, cdata_block)
 
+    for idx, video_url in video_storage.items():
+        placeholder = f"__VIDEO_PLACEHOLDER_{idx}__"
+        cdata_video = f"<![CDATA[{video_url}]]>"
+        pretty_xml = pretty_xml.replace(placeholder, cdata_video)
+
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(pretty_xml)
 
@@ -774,12 +752,12 @@ def parse_yml_and_build_avito(yml_path, output_path):
     print("=" * 60)
     
     if attached_videos_log:
-        print(f"\n🎬 СПИСОК ПРИКРЕПЛЕННЫХ ВИДЕО ({len(attached_videos_log)} шт.):")
+        print(f"\n🎬 СПИСОК ПРИКРЕПЛЕННЫХ ВИДЕОФАЙЛОВ ({len(attached_videos_log)} шт.):")
         for idx, item in enumerate(attached_videos_log, start=1):
             print(f"{idx}. [{item['id']}] (Код: {item['code']}) — {item['title']}")
-            print(f"   🔗 {item['url']}")
+            print(f"    🔗 {item['url']}")
     else:
-        print("\nℹ️ Неподдерживаемые видео (YouTube) успешно исключены из фида.")
+        print("\nℹ️ Подходящих видеофайлов поставщика не обнаружено.")
     print("=" * 60)
 
 
