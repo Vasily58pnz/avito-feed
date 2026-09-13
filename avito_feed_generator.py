@@ -36,23 +36,77 @@ OUT_OF_STOCK_STOP_WORDS = [
 ]
 
 
+def normalize_key(key: str) -> str:
+    """Очищает ключ от невидимых пробелов и приводит к единому виду"""
+    if not key:
+        return ""
+    cleaned = str(key).replace('\xa0', ' ').strip()
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    return cleaned.upper()
+
+
 def load_id_map(filepath):
+    """Загружает базу ID с обязательной нормализацией ключей"""
     if os.path.exists(filepath):
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                print(f"📖 Загружена карта ID из {filepath}: {len(data)} записей.")
-                return data
+                if isinstance(data, dict):
+                    normalized = {normalize_key(k): str(v).strip() for k, v in data.items()}
+                    print(f"📖 Загружена карта ID из {filepath}: {len(normalized)} записей.")
+                    return normalized
         except Exception as e:
             print(f"⚠️ Ошибка чтения {filepath}: {e}. Создается новая база.")
     return {}
 
 
-def save_id_map(filepath, data):
+def get_or_create_id(model_key: str, id_map: dict, fallback_num: str) -> str:
+    """
+    ЖЕЛЕЗНОЕ ПРАВИЛО:
+    1. Если артикул/модель уже есть в id_map — возвращаем СТАРЫЙ ID (ни при каких условиях не меняем!).
+    2. Если товар абсолютно новый — генерируем новый ID и фиксируем его.
+    """
+    clean_k = normalize_key(model_key)
+    if clean_k in id_map and id_map[clean_k]:
+        return id_map[clean_k]
+
+    new_id = f"{ID_PREFIX}{fallback_num}"
+    id_map[clean_k] = new_id
+    print(f"  ✨ Новый товар в базе: [{clean_k}] -> присвоен ID: {new_id}")
+    return new_id
+
+
+def save_id_map(filepath, current_data):
+    """
+    Безопасное сохранение:
+    - Читает файл с диска и объединяет записи (старые записи никогда не удаляются!).
+    - Атомарная запись через временный файл, чтобы не повредить JSON при сбое.
+    """
     try:
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"💾 Карта ID успешно сохранена в {filepath} (всего: {len(data)} шт.)")
+        disk_data = {}
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    disk_data = json.load(f)
+            except Exception:
+                disk_data = {}
+
+        # Объединяем: старое с диска сохраняется, новые товары дополняются
+        final_data = {normalize_key(k): str(v) for k, v in disk_data.items()}
+        for k, v in current_data.items():
+            clean_k = normalize_key(k)
+            if clean_k not in final_data:
+                final_data[clean_k] = str(v)
+
+        tmp_path = filepath + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(final_data, f, ensure_ascii=False, indent=2)
+
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        os.rename(tmp_path, filepath)
+
+        print(f"💾 Карта ID защищена и сохранена в {filepath} (всего в памяти: {len(final_data)} шт.)")
     except Exception as e:
         print(f"❌ Ошибка сохранения {filepath}: {e}")
 
@@ -63,35 +117,26 @@ def load_video_map(filepath):
             with open(filepath, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 print(f"🎬 Загружена карта видео из {filepath}: {len(data)} записей.")
-                return data
+                return {normalize_key(k): v for k, v in data.items()}
         except Exception as e:
             print(f"⚠️ Ошибка чтения {filepath}: {e}")
     return {}
 
 
 def extract_video_file_url(raw_video_str):
-    """
-    Извлекает только валидные прямые ссылки на видеофайлы от поставщика.
-    Веб-страницы просмотра Яндекс Диска (/i/, /d/, 360) отсекаются,
-    так как робот Авито не может их скачать напрямую.
-    """
     if not raw_video_str:
         return ""
         
     parts = re.split(r'[,;\s]+', str(raw_video_str).strip())
-    
     for link in parts:
         link = link.strip()
         if not link:
             continue
             
         link_lower = link.lower()
-        
-        # Отсекаем веб-страницы плееров и корпоративные аккаунты поставщика
         if any(bad in link_lower for bad in ["360.yandex", "mail.yandex", "yadi.sk/i/", "yadi.sk/d/", "disk.yandex.ru/i/", "disk.yandex.ru/d/"]):
             continue
             
-        # Принимаем только прямые файлы медиапотока
         is_direct_video = bool(re.search(r'\.(mp4|mov|hevc|webm)(\?[^\s<>"]*)?$', link, flags=re.IGNORECASE))
         if is_direct_video:
             return link
@@ -577,24 +622,21 @@ def parse_yml_and_build_avito(yml_path, output_path):
             continue
 
         # -------------------------------------------------------------
-        # СТАБИЛЬНЫЙ МЕХАНИЗМ ID ЧЕРЕЗ id_map.json
+        # СТАБИЛЬНЫЙ МЕХАНИЗМ ID ЧЕРЕЗ id_map.json (С ЗАЩИТОЙ)
         # -------------------------------------------------------------
         clean_model_key = re.sub(r'[-_](1\.5|2\.0|E|EURO|DUET|FAM|5070|7070|1SP|2SP).*$', '', base_code).strip()
         if not clean_model_key:
             clean_model_key = group_key
 
-        if clean_model_key in id_map:
-            final_ad_id = id_map[clean_model_key]
+        group_id_val = primary_item.get("group_id") or ""
+        if group_id_val:
+            fallback_num = group_id_val
         else:
-            group_id_val = primary_item.get("group_id") or ""
-            if group_id_val:
-                chosen_num = group_id_val
-            else:
-                digits = [int(it["offer_id"]) for it in items if it["offer_id"].isdigit()]
-                chosen_num = str(min(digits)) if digits else primary_item["offer_id"]
+            digits = [int(it["offer_id"]) for it in items if it["offer_id"].isdigit()]
+            fallback_num = str(min(digits)) if digits else primary_item["offer_id"]
 
-            final_ad_id = f"{ID_PREFIX}{chosen_num}"
-            id_map[clean_model_key] = final_ad_id
+        # Получаем ID: старый возвращается неприкосновенным, новый генерируется только при отсутствии
+        final_ad_id = get_or_create_id(clean_model_key, id_map, fallback_num)
 
         min_price = min(item["price"] for item in items)
 
@@ -792,7 +834,7 @@ def parse_yml_and_build_avito(yml_path, output_path):
         # -------------------------------------------------------------
         # ВЫБОР ВИДЕО (ПРИОРИТЕТ: video_map.json -> ПОСТАВЩИК)
         # -------------------------------------------------------------
-        group_video_url = video_map.get(clean_model_key, "")
+        group_video_url = video_map.get(normalize_key(clean_model_key), "")
         
         if not group_video_url:
             for it in items:
@@ -821,7 +863,7 @@ def parse_yml_and_build_avito(yml_path, output_path):
         desc_storage[processed_count] = description_body
         processed_count += 1
 
-    # Сохраняем обновленную карту ID для памяти в GitHub
+    # Сохраняем обновленную карту ID с защитой от удаления
     save_id_map(ID_MAP_FILE, id_map)
 
     raw_xml_string = ET.tostring(ads_node, encoding='utf-8').decode('utf-8')
