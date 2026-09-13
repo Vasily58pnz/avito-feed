@@ -17,7 +17,7 @@ ID_MAP_FILE = "id_map.json"
 VIDEO_MAP_FILE = "video_map.json"
 
 # Базовый адрес обложек с GitHub Pages
-GITHUB_COVERS_BASE = "https://vasily58pnz.github.io/avito-beds2/covers"
+GITHUB_COVERS_BASE = "https://vasily58pnz.github.io/avito-beds2/covers2"
 
 ID_PREFIX = "MNT-"
 
