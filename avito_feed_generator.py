@@ -70,6 +70,11 @@ def load_video_map(filepath):
 
 
 def extract_video_file_url(raw_video_str):
+    """
+    Извлекает только валидные прямые ссылки на видеофайлы от поставщика.
+    Веб-страницы просмотра Яндекс Диска (/i/, /d/, 360) отсекаются,
+    так как робот Авито не может их скачать напрямую.
+    """
     if not raw_video_str:
         return ""
         
@@ -82,14 +87,13 @@ def extract_video_file_url(raw_video_str):
             
         link_lower = link.lower()
         
-        # Отсекаем корпоративные ссылки Яндекс 360 / Mail (Авито не может их скачать)
-        if "360.yandex" in link_lower or "mail.yandex" in link_lower:
+        # Отсекаем веб-страницы плееров и корпоративные аккаунты поставщика
+        if any(bad in link_lower for bad in ["360.yandex", "mail.yandex", "yadi.sk/i/", "yadi.sk/d/", "disk.yandex.ru/i/", "disk.yandex.ru/d/"]):
             continue
             
-        is_yandex_disk = any(d in link_lower for d in ["disk.yandex.ru", "yadi.sk"])
+        # Принимаем только прямые файлы медиапотока
         is_direct_video = bool(re.search(r'\.(mp4|mov|hevc|webm)(\?[^\s<>"]*)?$', link, flags=re.IGNORECASE))
-        
-        if is_yandex_disk or is_direct_video:
+        if is_direct_video:
             return link
             
     return ""
