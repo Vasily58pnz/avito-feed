@@ -14,8 +14,9 @@ YML_URL = "https://ctradei.com/x/shop2_1410641-yml.xml"
 LOCAL_YML_FILE = "supplier_catalog.xml"
 OUTPUT_AVITO_XML = "avito_feed.xml"
 ID_MAP_FILE = "id_map.json"
+VIDEO_MAP_FILE = "video_map.json"
 
-# Базовый адрес твоих обложек с GitHub Pages
+# Базовый адрес обложек с GitHub Pages
 GITHUB_COVERS_BASE = "https://vasily58pnz.github.io/avito-beds2/covers"
 
 ID_PREFIX = "MNT-"
@@ -56,6 +57,18 @@ def save_id_map(filepath, data):
         print(f"❌ Ошибка сохранения {filepath}: {e}")
 
 
+def load_video_map(filepath):
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                print(f"🎬 Загружена карта видео из {filepath}: {len(data)} записей.")
+                return data
+        except Exception as e:
+            print(f"⚠️ Ошибка чтения {filepath}: {e}")
+    return {}
+
+
 def extract_video_file_url(raw_video_str):
     if not raw_video_str:
         return ""
@@ -67,7 +80,13 @@ def extract_video_file_url(raw_video_str):
         if not link:
             continue
             
-        is_yandex_disk = any(d in link.lower() for d in ["disk.yandex.ru", "disk.360.yandex.ru", "yadi.sk"])
+        link_lower = link.lower()
+        
+        # Отсекаем корпоративные ссылки Яндекс 360 / Mail (Авито не может их скачать)
+        if "360.yandex" in link_lower or "mail.yandex" in link_lower:
+            continue
+            
+        is_yandex_disk = any(d in link_lower for d in ["disk.yandex.ru", "yadi.sk"])
         is_direct_video = bool(re.search(r'\.(mp4|mov|hevc|webm)(\?[^\s<>"]*)?$', link, flags=re.IGNORECASE))
         
         if is_yandex_disk or is_direct_video:
@@ -419,8 +438,9 @@ def parse_yml_and_build_avito(yml_path, output_path):
         print(f"Файл {yml_path} не найден.")
         return
 
-    # Загружаем сохраненные соответствия ID
+    # Загружаем сохраненные базы соответствий ID и Видео
     id_map = load_id_map(ID_MAP_FILE)
+    video_map = load_video_map(VIDEO_MAP_FILE)
 
     print("Парсинг YML фида...")
     tree = ET.parse(yml_path)
@@ -555,16 +575,13 @@ def parse_yml_and_build_avito(yml_path, output_path):
         # -------------------------------------------------------------
         # СТАБИЛЬНЫЙ МЕХАНИЗМ ID ЧЕРЕЗ id_map.json
         # -------------------------------------------------------------
-        # Уникальный ключ модели (отрезаем суффиксы размеров, если они есть)
         clean_model_key = re.sub(r'[-_](1\.5|2\.0|E|EURO|DUET|FAM|5070|7070|1SP|2SP).*$', '', base_code).strip()
         if not clean_model_key:
             clean_model_key = group_key
 
         if clean_model_key in id_map:
-            # 1. Если модель уже публиковалась — берем ее постоянный ID
             final_ad_id = id_map[clean_model_key]
         else:
-            # 2. Если новинка: берем group_id или стабильный минимальный offer_id
             group_id_val = primary_item.get("group_id") or ""
             if group_id_val:
                 chosen_num = group_id_val
@@ -768,12 +785,16 @@ def parse_yml_and_build_avito(yml_path, output_path):
         ET.SubElement(ad_node, "Price").text = str(min_price)
         ET.SubElement(ad_node, "Address").text = AVITO_ADDRESS
         
-        # Ищем видеофайлы Яндекс Диска в товарах группы
-        group_video_url = ""
-        for it in items:
-            if it.get("feed_video"):
-                group_video_url = it["feed_video"]
-                break
+        # -------------------------------------------------------------
+        # ВЫБОР ВИДЕО (ПРИОРИТЕТ: video_map.json -> ПОСТАВЩИК)
+        # -------------------------------------------------------------
+        group_video_url = video_map.get(clean_model_key, "")
+        
+        if not group_video_url:
+            for it in items:
+                if it.get("feed_video"):
+                    group_video_url = it["feed_video"]
+                    break
         
         if group_video_url:
             video_element = ET.SubElement(ad_node, "VideoFileURL")
@@ -839,4 +860,3 @@ if __name__ == "__main__":
         print(f"\n❌ Ошибка: {e}")
         import traceback
         traceback.print_exc()
-
