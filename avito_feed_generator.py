@@ -23,7 +23,7 @@ ID_PREFIX = "MNT-"
 
 STATIC_BRAND = "СИТРЕЙД"
 MARGIN_MULTIPLIER = 1.30
-DELIVERY_FEE = 500  # Добавлено 500 рублей к каждому товару для бесплатной доставки
+DELIVERY_FEE = 500  # Закладываем в цену под бесплатную доставку
 PRICE_ROUND_STEP = 50
 AVITO_ADDRESS = "Санкт-Петербург, улица Циолковского, 9"
 
@@ -62,9 +62,8 @@ def load_id_map(filepath):
 
 def get_or_create_id(model_key: str, id_map: dict, fallback_num: str) -> str:
     """
-    ЖЕЛЕЗНОЕ ПРАВИЛО:
-    1. Если артикул/модель уже есть в id_map — возвращаем СТАРЫЙ ID (ни при каких условиях не меняем!).
-    2. Если товар абсолютно новый — генерируем новый ID и фиксируем его.
+    1. Если артикул/модель уже есть в id_map — возвращаем старый ID.
+    2. Если товар новый — генерируем новый ID и фиксируем его.
     """
     clean_k = normalize_key(model_key)
     if clean_k in id_map and id_map[clean_k]:
@@ -79,7 +78,7 @@ def get_or_create_id(model_key: str, id_map: dict, fallback_num: str) -> str:
 def save_id_map(filepath, current_data):
     """
     Безопасное сохранение:
-    - Читает файл с диска и объединяет записи (старые записи никогда не удаляются!).
+    - Читает файл с диска и объединяет записи (старые записи никогда не удаляются).
     - Атомарная запись через временный файл, чтобы не повредить JSON при сбое.
     """
     try:
@@ -91,7 +90,6 @@ def save_id_map(filepath, current_data):
             except Exception:
                 disk_data = {}
 
-        # Объединяем: старое с диска сохраняется, новые товары дополняются
         final_data = {normalize_key(k): str(v) for k, v in disk_data.items()}
         for k, v in current_data.items():
             clean_k = normalize_key(k)
@@ -398,6 +396,7 @@ def format_supplier_description_block(raw_desc):
         
     lines = text.split('\n')
     paragraphs = []
+    
     dim_keywords_strict = [
         r'пододеяльник', r'простын', r'наволочк',
         r'1[\.,]5\s*сп', r'1\.5\s*спальн', r'2[\.,]0\s*сп', r'2-?спальн',
@@ -405,14 +404,32 @@ def format_supplier_description_block(raw_desc):
         r'^\s*размеры\s*$'
     ]
     
+    disclaimer_keywords = [
+        r'отличат\w*\s+от\s+оригинал',
+        r'могут\s+незначительно\s+отличаться',
+        r'расположение\s+рисунка',
+        r'цвет\s+представленного',
+        r'внимание!?\s*цвет'
+    ]
+    
     for line in lines:
         clean_line = line.strip()
-        if not clean_line or any(re.search(kw, clean_line.lower()) for kw in dim_keywords_strict):
+        if not clean_line:
+            continue
+        if any(re.search(kw, clean_line.lower()) for kw in dim_keywords_strict):
+            continue
+        if any(re.search(kw, clean_line.lower()) for kw in disclaimer_keywords):
             continue
         if re.search(r'^\D{0,15}\d{2,3}\s*[\*хx×-]\s*\d{2,3}\D{0,10}$', clean_line):
             continue
+            
         clean_line = re.sub(r'["\'«»„“”`]', '', clean_line).strip()
-        clean_line = re.sub(r'^(Ткань|Состав|Плотность|Наполнитель|Состав наполнителя|Метод окрашивания|Окрашивание|Упаковка|Особенности)\s*:\s*(.*)', r'🔹 <b>\1:</b> \2', clean_line, flags=re.IGNORECASE)
+        clean_line = re.sub(
+            r'^(Ткань|Состав|Плотность|Наполнитель|Состав наполнителя|Метод окрашивания|Окрашивание|Упаковка|Особенности)\s*:\s*(.*)', 
+            r'🔹 <b>\1:</b> \2', 
+            clean_line, 
+            flags=re.IGNORECASE
+        )
         paragraphs.append(clean_line)
         
     if not paragraphs:
@@ -487,7 +504,6 @@ def parse_yml_and_build_avito(yml_path, output_path):
         print(f"Файл {yml_path} не найден.")
         return
 
-    # Загружаем сохраненные базы соответствий ID и Видео
     id_map = load_id_map(ID_MAP_FILE)
     video_map = load_video_map(VIDEO_MAP_FILE)
 
@@ -621,9 +637,6 @@ def parse_yml_and_build_avito(yml_path, output_path):
         if SKIP_BEDSPREADS and subtype in ["Покрывала", "Пледы"]:
             continue
 
-        # -------------------------------------------------------------
-        # СТАБИЛЬНЫЙ МЕХАНИЗМ ID ЧЕРЕЗ id_map.json (С ЗАЩИТОЙ)
-        # -------------------------------------------------------------
         clean_model_key = re.sub(r'[-_](1\.5|2\.0|E|EURO|DUET|FAM|5070|7070|1SP|2SP).*$', '', base_code).strip()
         if not clean_model_key:
             clean_model_key = group_key
@@ -635,9 +648,7 @@ def parse_yml_and_build_avito(yml_path, output_path):
             digits = [int(it["offer_id"]) for it in items if it["offer_id"].isdigit()]
             fallback_num = str(min(digits)) if digits else primary_item["offer_id"]
 
-        # Получаем ID: старый возвращается неприкосновенным, новый генерируется только при отсутствии
         final_ad_id = get_or_create_id(clean_model_key, id_map, fallback_num)
-
         min_price = min(item["price"] for item in items)
 
         if subtype == "Комплект постельного белья":
@@ -667,7 +678,6 @@ def parse_yml_and_build_avito(yml_path, output_path):
             has_multiple = len(items) > 1
             single_size_label = ""
 
-        # Собираем фото поставщика
         all_images = []
         seen_imgs = set()
         for it in items:
@@ -676,7 +686,6 @@ def parse_yml_and_build_avito(yml_path, output_path):
                     seen_imgs.add(img)
                     all_images.append(img)
 
-        # Замещение первой фотографии обложкой с инфографикой
         safe_art = re.sub(r'[\\/*?:"<>| ]', '_', base_code)
         custom_cover_url = f"{GITHUB_COVERS_BASE}/{safe_art}.jpg"
 
@@ -745,14 +754,36 @@ def parse_yml_and_build_avito(yml_path, output_path):
 
         supplier_desc_block = format_supplier_description_block(primary_item["description"])
 
-        raw_description_body = f"""<p><b>{final_avito_title}</b></p>
-<p><b>🇷🇺 Собственное фабричное производство «СИТРЕЙД» в России</b> — предприятие успешно работает на российском текстильном рынке с 2008 года, изготавливая сертифицированную продукцию наивысшего качества для покупателей по всей России, а также экспортируя текстиль в Беларусь и Казахстан. Фабрика следит за современными тенденциями уюта и дизайна, применять премиальные гипоаллергенные ткани стойкого крашения и обеспечивает строгий контроль фабричного пошива.</p>
-{supplier_desc_block}
+        # -------------------------------------------------------------
+        # ДИНАМИЧЕСКИЙ БЛОК: ЧЕСТНЫЙ ЗНАК / СЕРТИФИКАЦИЯ
+        # -------------------------------------------------------------
+        has_chestny_znak = subtype not in ["Покрывала", "Пледы", "Наматрасники", "Подушки"]
+        if has_chestny_znak:
+            cert_bullet = "🛡️ <b>Сертифицированная продукция:</b> товар изготовлен фабрикой «СИТРЕЙД», имеет официальные декларации соответствия и обязательную маркировку «Честный Знак»."
+        else:
+            cert_bullet = "🛡️ <b>Сертифицированная продукция:</b> товар изготовлен фабрикой «СИТРЕЙД», сертифицирован и проходит строгий контроль фабричного пошива."
+
+        # -------------------------------------------------------------
+        # ОБНОВЛЕННЫЙ ПРОДАЮЩИЙ ШАБЛОН ОПИСАНИЯ
+        # -------------------------------------------------------------
+        raw_description_body = f"""<p><b>{final_avito_title}</b> напрямую с фабричного производства со склада в Санкт-Петербурге!</p>
+<p><b>📍 СКЛАД И АВИТО ДОСТАВКА:</b><br>
+Мы работаем в формате онлайн-склада (отгрузка напрямую с производства в Санкт-Петербурге, без наценок торговых центров).<br>
+• <b>Бесплатная доставка:</b> отправляем через <b>СДЭК</b> и <b>Почту России</b> по Санкт-Петербургу и всей стране.<br>
+• <b>Безопасная сделка:</b> оплата резервируется Авито. Вы проверяете заказ при получении в пункте выдачи и только после этого подтверждаете получение.<br>
+• Заказ оперативно передается в службу доставки со склада фабрики.</p>
 {variants_block_html}
-<p><b>🌟 ПОЧЕМУ ВЫБИРАЮТ ИМЕННО НАС (Наши преимущества):</b></p>
-<ul><li>🛡️ <b>Сертифицированная продукция:</b> Товар имеет официальные сертификаты качества, декларации соответствия и обязательную маркировку «Честный Знак».</li><li>🎬 <b>Детальные видеообзоры:</b> Для большинства комплектов у нас есть подробные видеообзоры — напишите нам в чат, и мы с удовольствием пришлем ссылку на видео!</li><li>✅ <b>Гарантия соответствия фото 100%:</b> Вы получите именно тот рисунок и расцветку, которую заказывали.</li><li>🔒 <b>Безопасная сделка Авито:</b> Оплата резервируется сайтом Авито и переводится продавцу только после того, как вы проверите и заберете товар в пункте выдачи.</li><li>⚡ <b>Быстрая отправка за 24 часа:</b> Заказ передается в доставку со склада в день заказа или на следующий рабочий день.</li><li>📏 <b>Помощь с выбором:</b> Не знаете, какую простынь или размер выбрать? Напишите в чат — подскажем за 2 минуты!</li><li>🎁 <b>Презентабельный вид:</b> Фирменная упаковка — отлично подходит как для себя, так и на подарок.</li><li>🚚 <b>Надежная Авито Доставка:</b> Отправка через СДЭК и Почту России по всей стране.</li></ul>
-<p>🛍️ <b>Переходите в наш профиль</b> — там представлен весь каталог домашнего текстиля: постельное белье, простыни на резинке, пледы, покрывала, наволочки и наматрасники. Подписывайтесь на профиль, чтобы первыми узнавать о новинках и скидках!</p>
-<p>💬 <b>Напишите нам в чат</b> — поможем с выбором, забронируем нужный размер и оперативно отправим через безопасную сделку Авито!</p>
+{supplier_desc_block}
+<p><b>🌟 НАШИ ПРЕИМУЩЕСТВА:</b></p>
+<ul>
+<li>{cert_bullet}</li>
+<li>📷 <b>Подробные студийные фотографии:</b> в карточке представлены детальные фото в высоком разрешении, где отчетливо видна реальная фактура ткани, плотность плетения и качество фабричных строчек.</li>
+<li>✅ <b>Гарантия соответствия:</b> вы получите именно ту расцветку, рисунок и комплектацию, которую выбрали.</li>
+<li>🎁 <b>Презентабельный вид:</b> надежная фирменная упаковка — отлично подходит как для личного комфорта, так и в подарок.</li>
+<li>📏 <b>Помощь с выбором:</b> сомневаетесь в размере или типе простыни? Напишите нам в чат — подскажем за 2 минуты!</li>
+</ul>
+<p>🛍️ <b>Переходите в наш профиль</b> — там представлен весь каталог домашнего текстиля: постельное белье, простыни на резинке, пледы, покрывала, наволочки и наматрасники. Добавляйте объявление в Избранное ❤️, чтобы первыми узнавать о новинках и скидках!</p>
+<p>💬 <b>Напишите нам в чат</b> — подскажем по наличию нужного размера и оперативно оформим отправку через безопасную сделку Авито!</p>
 <p>📌 Артикул модели: {base_code}</p>"""
 
         description_body = re.sub(r'>\s+<', '><', raw_description_body.strip())
@@ -831,9 +862,6 @@ def parse_yml_and_build_avito(yml_path, output_path):
         ET.SubElement(ad_node, "Price").text = str(min_price)
         ET.SubElement(ad_node, "Address").text = AVITO_ADDRESS
         
-        # -------------------------------------------------------------
-        # ВЫБОР ВИДЕО (ПРИОРИТЕТ: video_map.json -> ПОСТАВЩИК)
-        # -------------------------------------------------------------
         group_video_url = video_map.get(normalize_key(clean_model_key), "")
         
         if not group_video_url:
@@ -854,7 +882,6 @@ def parse_yml_and_build_avito(yml_path, output_path):
                 "url": group_video_url
             })
         
-        # Запись картинок: кастомная обложка первая, затем ракурсы
         if final_gallery:
             images_node = ET.SubElement(ad_node, "Images")
             for img_url in final_gallery[:10]:
@@ -863,7 +890,6 @@ def parse_yml_and_build_avito(yml_path, output_path):
         desc_storage[processed_count] = description_body
         processed_count += 1
 
-    # Сохраняем обновленную карту ID с защитой от удаления
     save_id_map(ID_MAP_FILE, id_map)
 
     raw_xml_string = ET.tostring(ads_node, encoding='utf-8').decode('utf-8')
