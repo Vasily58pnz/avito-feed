@@ -521,6 +521,52 @@ def parse_yml_and_build_avito(yml_path, output_path):
     offers = root.findall(".//offer")
     print(f"Найдено исходных товаров в YML: {len(offers)}")
 
+    # =========================================================================
+    # ПРЕДВАРИТЕЛЬНЫЙ СБОР МОДИФИКАЦИЙ НА РЕЗИНКЕ (до фильтрации стоп-слов)
+    # =========================================================================
+    elastic_info_by_model = defaultdict(lambda: defaultdict(lambda: {"price": float("inf"), "sheets": set(), "heights": set()}))
+    for offer in offers:
+        params_dict = {}
+        for param in offer.findall("param"):
+            p_name = param.attrib.get("name", "").strip()
+            p_val = param.text.strip() if param.text else ""
+            if p_name and p_val:
+                params_dict[p_name] = p_val
+        
+        v_code = (offer.findtext("vendorCode") or params_dict.get("Артикул", "") or params_dict.get("Код", "") or "").strip().upper()
+        stype = params_dict.get("Тип простыни", "")
+        name = offer.findtext("name") or ""
+
+        # Проверяем, относится ли товар к комплектам на резинке
+        if stype == "На резинке" or "резин" in name.lower() or re.search(r'^[A-Z]+R\d+', v_code):
+            # Превращаем артикул на резинке в базовый (GCR009 -> GC009, MTR001 -> MT001, AR377 -> A377)
+            base_code = re.sub(r'^([A-Z]+)R(\d+.*)', r'\1\2', v_code)
+            clean_base = re.sub(r'[-_](1\.5|2\.0|E|EURO|DUET|FAM|5070|7070|1SP|2SP).*$', '', base_code).strip()
+            
+            set_size = params_dict.get("Выбрать размер", "")
+            sheet_size = params_dict.get("Размер простыни", "")
+            price_elem = offer.find("price")
+            
+            if price_elem is not None and price_elem.text:
+                try:
+                    wholesale_price = float(price_elem.text.strip())
+                    raw_retail = (wholesale_price * MARGIN_MULTIPLIER) + DELIVERY_FEE
+                    retail_price = round_up_price(raw_retail, PRICE_ROUND_STEP)
+                    
+                    if set_size and retail_price > 0:
+                        item_data = elastic_info_by_model[clean_base][set_size]
+                        item_data["price"] = min(item_data["price"], retail_price)
+                        if sheet_size:
+                            parts = [p.strip() for p in sheet_size.replace("*", "х").split("х") if p.strip()]
+                            if len(parts) >= 2:
+                                item_data["sheets"].add(f"{parts[0]}х{parts[1]}")
+                            if len(parts) >= 3:
+                                item_data["heights"].add(parts[2])
+                except ValueError:
+                    pass
+
+    print(f"🧵 Собрано моделей с модификациями на резинке: {len(elastic_info_by_model)} шт.")
+
     groups = defaultdict(list)
     skipped_custom_order = 0
 
@@ -731,10 +777,60 @@ def parse_yml_and_build_avito(yml_path, output_path):
                     variants_lines.append(
                         f"<li>🔹 <b>{it['size']}</b> (наволочки {it['pillow_details']}): пододеяльник {it['duvet_details']}, простыня {it['sheet_details']} — <b>{it['price']} ₽</b></li>"
                     )
+
+            # Проверяем, есть ли для этой модели модификации на резинке под заказ
+            elastic_data = elastic_info_by_model.get(clean_model_key)
+            elastic_section_html = ""
+            if elastic_data:
+                def get_size_rank(sz):
+                    s = sz.lower()
+                    if "1.5" in s or "полутор" in s:
+                        return 1
+                    if "2" in s or "двуспальн" in s:
+                        return 2
+                    if "евро" in s or "euro" in s:
+                        return 3
+                    if "дуэт" in s or "семейн" in s:
+                        return 4
+                    return 99
+
+                all_sheets = sorted(
+                    set().union(*[v["sheets"] for v in elastic_data.values()]),
+                    key=lambda s: int(re.search(r'\d+', s).group(0)) if re.search(r'\d+', s) else s
+                )
+                sheets_str = ", ".join(all_sheets) if all_sheets else "140х200, 160х200, 180х200"
+
+                # Динамическое определение точной высоты борта
+                all_heights = sorted(
+                    set().union(*[v["heights"] for v in elastic_data.values() if "heights" in v]),
+                    key=lambda h: int(re.search(r'\d+', h).group(0)) if re.search(r'\d+', h) else 0
+                )
+                if all_heights:
+                    if len(all_heights) == 1:
+                        height_str = f"высота борта {all_heights[0]} см"
+                    else:
+                        height_str = f"высота борта {all_heights[0]}–{all_heights[-1]} см"
+                else:
+                    height_str = "высота борта 25 см"
+
+                sorted_el_sizes = sorted(elastic_data.keys(), key=lambda s: (get_size_rank(s), s))
+                el_lines = []
+                for el_sz in sorted_el_sizes:
+                    el_price = elastic_data[el_sz]["price"]
+                    el_lines.append(f"<li>🔹 <b>{el_sz} на резинке</b> — <b>{el_price} ₽</b></li>")
+
+                elastic_section_html = f"""<p><b>🧵 Также доступны модификации с простыней НА РЕЗИНКЕ (пошив под заказ 1–3 дня):</b><br>
+<i>(размер матраса на выбор: {sheets_str} см, {height_str}, резинка по всему кругу)</i></p>
+<ul>
+{''.join(el_lines)}
+</ul>
+<p>💬 <i>Для заказа на резинке напишите нам размер матраса в чат — согласуем детали и передадим в раскрой на фабрику!</i></p>"""
+
             variants_block_html = f"""<p><b>📐 В наличии размеры и комплектация этой модели:</b></p>
 <ul>
 {''.join(variants_lines)}
-</ul>"""
+</ul>{elastic_section_html}"""
+
         elif subtype in ["Покрывала", "Пледы", "Подушки"]:
             if has_multiple:
                 sorted_items = sorted(items, key=lambda x: x["price"])
@@ -854,6 +950,7 @@ def parse_yml_and_build_avito(yml_path, output_path):
         ET.SubElement(ad_node, "AdType").text = "Товар куплен на продажу"
         ET.SubElement(ad_node, "Condition").text = "Новое"
         ET.SubElement(ad_node, "Availability").text = "В наличии"
+        ET.SubElement(ad_node, "Quantity").text = "1"
         ET.SubElement(ad_node, "Title").text = final_avito_title
         
         desc_element = ET.SubElement(ad_node, "Description")
