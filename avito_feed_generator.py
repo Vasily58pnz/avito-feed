@@ -26,7 +26,6 @@ STATIC_BRAND = "СИТРЕЙД"
 # Новая финансовая модель (чистая маржа ~800-900 руб с комплекта)
 MARGIN_MULTIPLIER = 1.35  # +35% маржи к опту
 DROPSHIP_FEE = 265  # Сбор Ситрейда за сборку розницы
-DELIVERY_FEE = 700  # Реальная доставка СДЭК со склада СПб по РФ с запасом
 PRICE_ROUND_STEP = 50  # Округление до красивых розничных цен
 
 AVITO_ADDRESS = "Санкт-Петербург, улица Циолковского, 9"
@@ -199,10 +198,10 @@ def round_up_price(price, step=50):
 
 
 def calc_retail_price(wholesale_price: float) -> int:
-  """Точный расчет розничной цены: (опт * 1.35) + сборка 265 + доставка 700"""
+  """Точный расчет розничной цены: (опт * 1.35) + сборка 265"""
   raw_retail_price = (
       wholesale_price * MARGIN_MULTIPLIER
-  ) + DROPSHIP_FEE + DELIVERY_FEE
+  ) + DROPSHIP_FEE
   return round_up_price(raw_retail_price, PRICE_ROUND_STEP)
 
 
@@ -263,10 +262,7 @@ def normalize_avito_bed_linen_size(size_str):
 
 
 def check_is_pure_cotton(params_dict, raw_desc, title) -> bool:
-  """Проверяет, является ли комплект 100% хлопком.
-
-  Если есть ПЭ, полиэстер, полисатин, вискоза и т.д. — возвращает False.
-  """
+  """Проверяет, является ли комплект 100% хлопком."""
   comp_text = (
       f"{params_dict.get('Состав', '')} {params_dict.get('Ткань', '')}"
       f" {params_dict.get('Материал', '')}"
@@ -276,7 +272,6 @@ def check_is_pure_cotton(params_dict, raw_desc, title) -> bool:
     if comp_match:
       comp_text = comp_match.group(1)
 
-  # Если прямо указана синтетика или смесовая ткань:
   if re.search(
       r"\b(пэ|полиэстер|полиэфир|вискоз\w*|микрофибр\w*|акрил\w*|полисатин)\b",
       comp_text,
@@ -682,15 +677,6 @@ def extract_main_composition(title, params_dict):
 def generate_group_title(
     base_title, subtype, material, size_label="", is_cotton=False
 ):
-  """Генерирует SEO-заголовок строго до 50 символов:
-
-  - Для постельного белья: 'Постельное белье {Ткань} {Коллекция} [Хлопок]
-  {Размер}'
-  - Размер витринного образца всегда ставится в самом конце заголовка и
-  защищен от обрезки.
-  - Если в составе есть примеси синтетики — слово 'Хлопок' гарантированно
-  удаляется.
-  """
   title = base_title.strip()
 
   title = re.sub(r"\b\d+[\s]*%[\s]*", "", title)
@@ -743,11 +729,9 @@ def generate_group_title(
     full_base = f"Постельное белье {clean_base}".strip()
 
     if not is_cotton:
-      # Если состав смесовый — слово Хлопок удаляется
       full_base = re.sub(r"\bхлопок\b", "", full_base, flags=re.IGNORECASE)
       full_base = re.sub(r"\s+", " ", full_base).strip(" ,/-–—|")
     else:
-      # Если 100% чистый хлопок — добавляем Хлопок перед размером
       if (
           len(full_base) <= 33
           and "хлопок" not in full_base.lower()
@@ -798,9 +782,6 @@ def parse_yml_and_build_avito(yml_path, output_path):
   offers = root.findall(".//offer")
   print(f"Найдено исходных товаров в YML: {len(offers)}")
 
-  # =========================================================================
-  # ПРЕДВАРИТЕЛЬНЫЙ СБОР МОДИФИКАЦИЙ НА РЕЗИНКЕ (до фильтрации стоп-слов)
-  # =========================================================================
   elastic_info_by_model = defaultdict(
       lambda: defaultdict(
           lambda: {"price": float("inf"), "sheets": set(), "heights": set()}
@@ -1039,9 +1020,7 @@ def parse_yml_and_build_avito(yml_path, output_path):
     final_ad_id = get_or_create_id(clean_model_key, id_map, fallback_num)
     min_price = min(item["price"] for item in items)
 
-    # Определение размера для заголовка
     if subtype == "Комплект постельного белья":
-      # Размер витринного образца (с минимальной ценой)
       min_item = min(items, key=lambda x: x["price"])
       size_map = {
           "1.5-спальный": "1.5-сп",
@@ -1089,8 +1068,6 @@ def parse_yml_and_build_avito(yml_path, output_path):
         final_gallery.append(img)
 
     material = extract_textile_material(base_title, params_dict)
-
-    # Проверка 100% хлопкового состава:
     is_pure_cotton = check_is_pure_cotton(
         params_dict, primary_item["description"], base_title
     )
@@ -1107,9 +1084,6 @@ def parse_yml_and_build_avito(yml_path, output_path):
         primary_item["description"]
     )
 
-    # -------------------------------------------------------------
-    # ФОРМИРОВАНИЕ ОПИСАНИЯ
-    # -------------------------------------------------------------
     if subtype == "Комплект постельного белья":
       size_order = {
           "1.5-спальный": 1,
@@ -1121,14 +1095,12 @@ def parse_yml_and_build_avito(yml_path, output_path):
           items, key=lambda x: (size_order.get(x["size"], 99), x["price"])
       )
 
-      # Собираем минимальные цены по каждому размеру
       size_prices = {}
       for it in sorted_items:
         sz = it["size"]
         if sz not in size_prices or it["price"] < size_prices[sz]:
           size_prices[sz] = it["price"]
 
-      # Группируем элементы по размеру
       size_groups = defaultdict(list)
       for it in sorted_items:
         size_groups[it["size"]].append(it)
@@ -1157,7 +1129,6 @@ def parse_yml_and_build_avito(yml_path, output_path):
             f" {sheet_val}, {pillow_str} — <b>{price_val} ₽</b></li>"
         )
 
-      # 1. Верхний сниппет для выдачи (первые 2 строки)
       short_names = {
           "1.5-спальный": "1.5-сп",
           "2-спальный": "2-сп",
@@ -1175,17 +1146,14 @@ def parse_yml_and_build_avito(yml_path, output_path):
         snippet_str = " | ".join(snippet_items)
         top_snippet = (
             f"<p><b>В наличии размеры: {snippet_str} 🧵 Возможен пошив простыни"
-            " на резинке!</b><br>🚚 <b>Бесплатная Авито-доставка</b> напрямую с"
-            " фабричного производства со склада в Санкт-Петербурге.</p>"
+            " на резинке!</b></p>"
         )
       else:
         top_snippet = (
             f"<p><b>В наличии: 🔹{min_price} ₽ 🧵 Возможен пошив простыни на"
-            " резинке!</b><br>🚚 <b>Бесплатная Авито-доставка</b> напрямую с"
-            " фабричного производства со склада в Санкт-Петербурге.</p>"
+            " резинке!</b></p>"
         )
 
-      # 2. Модификации на резинке
       elastic_data = elastic_info_by_model.get(clean_model_key)
       elastic_section_html = ""
       if elastic_data:
@@ -1273,7 +1241,7 @@ def parse_yml_and_build_avito(yml_path, output_path):
 {supplier_desc_block}
 <p><b>🌟 НАШИ ПРЕИМУЩЕСТВА:</b></p>
 <ul>
-<li>🚚 <b>Бесплатная Авито Доставка:</b> бережно отправим через СДЭК или Почту России в любую точку страны через безопасную сделку (оплата бронируется Авито, проверка при получении).</li>
+<li>🚚 <b>Авито Доставка:</b> бережно отправим через СДЭК в любую точку страны через безопасную сделку (оплата бронируется Авито, проверка при получении).</li>
 <li>🛡️ <b>Сертифицированная продукция:</b> товар изготовлен на российском фабричном производстве, имеет официальные декларации соответствия и обязательную маркировку «Честный Знак».</li>
 <li>📷 <b>Подробные студийные фотографии:</b> в карточке представлены детальные фото в высоком разрешении, где отчетливо видна реальная фактура ткани, плотность плетения и качество фабричных строчек.</li>
 <li>🎁 <b>Презентабельный вид:</b> надежная фирменная упаковка — отлично подходит как для личного комфорта, так и в подарок.</li>
@@ -1346,7 +1314,7 @@ def parse_yml_and_build_avito(yml_path, output_path):
       raw_description_body = f"""<p><b>{final_avito_title}</b> напрямую с фабричного производства со склада в Санкт-Петербурге!</p>
 <p><b>📍 СКЛАД И АВИТО ДОСТАВКА:</b><br>
 Мы работаем в формате онлайн-склада (отгрузка напрямую с производства в Санкт-Петербурге, без наценок торговых центров).<br>
-- <b>Бесплатная доставка:</b> отправляем через <b>СДЭК</b> и <b>Почту России</b> по Санкт-Петербургу и всей стране.<br>
+- <b>Авито Доставка:</b> отправляем через <b>СДЭК</b> по Санкт-Петербургу и всей стране.<br>
 - <b>Безопасная сделка:</b> оплата резервируется Авито. Вы проверяете заказ при получении в пункте выдачи и только после этого подтверждаете получение.<br>
 - Заказ оперативно передается в службу доставки со склада фабрики.</p>
 {variants_block_html}
